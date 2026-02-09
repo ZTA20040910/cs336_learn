@@ -105,8 +105,8 @@ def benchmarking_and_profiling():
     text("Example computation: running forward/backward passes on an MLP.")
     run_mlp(dim=128, num_layers=16, batch_size=128, num_steps=5)
 
-    benchmarking()       # How long does it take?
-    profiling()          # Where time is being spent?
+    benchmarking()       # How long does it take? 基准测试
+    profiling()          # Where time is being spent? 性能分析
 
     text("Every time you make a change, benchmark/profile!")
 
@@ -231,27 +231,36 @@ def benchmarking():
     text("We did not use this to make benchmarking more transparent.")
 
 
+# 1. 定义函数：传入描述、运行函数、预热次数和试验次数
 def benchmark(description: str, run: Callable, num_warmups: int = 1, num_trials: int = 3):
     """Benchmark `func` by running it `num_trials`, and return all the times."""
     # Warmup: first times might be slower due to compilation, things not cached.
     # Since we will run the kernel multiple times, the timing that matters is steady state.
+    # 2. 预热阶段 (Warmup)：在正式计时前先跑几次
+    # 注释说明：第一次运行可能涉及编译或缓存加载，会比较慢。稳态性能（Steady State）才是我们要测量的。
     for _ in range(num_warmups):
         run()
+    # 3. GPU 同步：如果使用 CUDA，强制等待之前所有的异步任务执行完毕
     if torch.cuda.is_available():
-        torch.cuda.synchronize()  # Wait for CUDA threads to finish (important!)
+        torch.cuda.synchronize()  # Wait for CUDA threads to finish (important!)，确保预热任务彻底跑完，不干扰后续计时
 
     # Time it for real now!
+    # 4. 正式计时开始
     times: list[float] = [] # @inspect times, @inspect description
-    for trial in range(num_trials):  # Do it multiple times to capture variance
-        start_time = time.time()
+    for trial in range(num_trials):  # Do it multiple times to capture variance，多次运行以捕捉性能波动（方差）
+        start_time = time.time() # 记录 CPU 开始时间
 
-        run()  # Actually perform computation
+        run()  # Actually perform computation，5. 执行核心计算任务
+        # 6. 关键点：GPU 同步
+        # 注释说明：CUDA 是异步的，CPU 发出指令后不等待 GPU 算完就会继续跑。
+        # 必须同步，否则 CPU 测得的时间只是“下发任务”的时间，而不是“执行任务”的时间。
         if torch.cuda.is_available():
             torch.cuda.synchronize()  # Wait for CUDA threads to finish (important!)
 
-        end_time = time.time()
-        times.append((end_time - start_time) * 1000) # @inspect times
+        end_time = time.time() # 记录结束时间
+        times.append((end_time - start_time) * 1000) # @inspect times，换算成毫秒(ms)
 
+    # 7. 计算平均值：返回多次运行的平均耗时
     mean_time = mean(times) # @inspect mean_time
     return mean_time
 
@@ -322,31 +331,38 @@ def profiling():
 
 
 def profile(description: str, run: Callable, num_warmups: int = 1, with_stack: bool = False):
-    # Warmup
+    # Warmup，目的：让 GPU 进入稳定状态，排除掉初次运行时的各种初始化耗时
     for _ in range(num_warmups):
         run()
+    # GPU 强制同步，确保预热产生的异步任务全部执行完毕，不要干扰接下来的计时
     if torch.cuda.is_available():
         torch.cuda.synchronize()  # Wait for CUDA threads to finish (important!)
 
-    # Run the code with the profiler
+    # Run the code with the profiler，开启 PyTorch 分析器，这是一个上下文管理器 (with 语句)，退出该代码块后分析会自动结束
     with torch.profiler.profile(
+            # 同时监控 CPU 活动（主线程逻辑）和 CUDA 活动（显卡算子执行）
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            # Output stack trace for visualization
+            # Output stack trace for visualization，是否记录调用栈，设置为 True 后，Profiler 会保存 Python 代码的层级关系
             with_stack=with_stack,
-            # Needed to export stack trace for visualization
+            # Needed to export stack trace for visualization，是否导出调用栈，开启 verbose=True 可以更详细地显示内部算子信息（导出堆栈时必需）
             experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True)) as prof:
         run()
+        # 再次同步，这是为了确保所有的 GPU Kernerl 在 profiler 上下文结束前已经运行完，否则异步执行的任务可能无法被分析器完整捕捉到
         if torch.cuda.is_available():
             torch.cuda.synchronize()  # Wait for CUDA threads to finish (important!)
 
     # Print out table
+    # key_averages(): 将数据按操作名称归并（比如把所有矩阵乘法的时间加在一起）
+    # sort_by="cuda_time_total": 让耗时最久的 GPU 算子排在最前面，抓出“元凶”
+    # max_name_column_width=80: 防止太长的函数名被截断
+    # row_limit=10: 只取耗时最高的前 10 个算子
     table = prof.key_averages().table(sort_by="cuda_time_total",
                                       max_name_column_width=80,
                                       row_limit=10)
     #text(f"## {description}")
     #text(table, verbatim=True)
 
-    # Write stack trace visualization
+    # Write stack trace visualization，如果记录了堆栈信息 (with_stack=True)，则执行导出
     if with_stack:
         text_path = f"var/stacks_{description}.txt"
         svg_path = f"var/stacks_{description}.svg"
@@ -443,31 +459,38 @@ def create_cuda_gelu():
     text("You write code that a thread execute, using (blockIdx, blockDim, threadIdx) to determine what to do.")
 
     text("Set CUDA_LAUNCH_BLOCKING so that if there are errors, CUDA will tell you what went wrong.")
+    # 正常 CUDA 运行是异步的，报错也不显示在哪一行。设置此变量后，CUDA 会同步运行，报错能精准定位，虽然性能由于同步会变慢。
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
     text("The `load_inline` function makes it convenient to write CUDA code and bind it to a Python module for immediate use.")
 
     # CUDA code: has the full logic
+    # 读取外部 CUDA 源代码，这是一个真正的 .cu 文件，里面包含了 __global__ 关键字定义的 CUDA Kernel。
     cuda_gelu_src = open("gelu.cu").read()
     text(cuda_gelu_src, verbatim=True)
 
-    # C++ code: defines the gelu function
+    # C++ code: defines the gelu function，定义 C++ 接口，虽然 Kernel 在 .cu 里，但我们需要在 C++ 层暴露出一个函数名给 Python 调用。这行定义了 Python 将看到的函数签名：输入一个 Tensor，返回一个 Tensor。
     cpp_gelu_src = "torch::Tensor gelu(torch::Tensor x);"
 
     text("Compile the CUDA code and bind it to a Python module.")
     ensure_directory_exists("var/cuda_gelu")
     if not torch.cuda.is_available():
         return None
+    #【核心步骤】即时编译 (JIT Compilation)。load_inline 函数会做以下事情：
+    # 1. 把 cuda_sources 和 cpp_sources 拼在一起。
+    # 2. 调用系统里的 nvcc 编辑器进行编译。
+    # 3. 使用 pybind11 将编译生成的机器码“链接”到 Python 进程中。
     module = load_inline(
-        cuda_sources=[cuda_gelu_src],
-        cpp_sources=[cpp_gelu_src],
-        functions=["gelu"],
-        extra_cflags=["-O2"],
-        verbose=True,
-        name="inline_gelu",
-        build_directory="var/cuda_gelu",
+        cuda_sources=[cuda_gelu_src], # 具体的 GPU 逻辑
+        cpp_sources=[cpp_gelu_src], # CPU 侧的封装逻辑
+        functions=["gelu"], # 想要暴露给 Python 调用的函数名列表
+        extra_cflags=["-O2"], # 编译器优化等级（2级优化）
+        verbose=True, # 打印编译进度（你能看到 nvcc 的输出）
+        name="inline_gelu", # 生成的模块名
+        build_directory="var/cuda_gelu", # 存放结果的地方
     )
 
+    # 获取函数句柄，现在 module 就像是一个普通的 Python 模块了，我们可以直接取其内部的 gelu 函数。
     cuda_gelu = getattr(module, "gelu")
     return cuda_gelu
 
@@ -553,27 +576,36 @@ def triton_gelu_kernel(x_ptr, y_ptr, num_elements, BLOCK_SIZE: tl.constexpr):
     # Input is at `x_ptr` and output is at `y_ptr`
     #     |        Block 0            |          Block 1          |      ...      |
     #                            BLOCK_SIZE                                 num_elements
+    #（tl.constexpr 表示这是一个编译时常量）
 
+    # 获取当前“程序 ID” (Program ID)。相当于 CUDA 里的 blockIdx.x。如果你开启了 100 个块，pid 分别就是 0 到 99。
     pid = tl.program_id(axis=0)
+    # 计算当前块负责的任务起点。比如 pid=1, BLOCK_SIZE=1024，那么我们就从索引 1024 开始算。
     block_start = pid * BLOCK_SIZE
 
     # Indices where this thread block should operate
+    # 生成这一块的索引序列。tl.arange(0, 1024) 生成 [0, 1, ..., 1023]。
+    # 加上 block_start 后，offsets 就是这组工人要处理的 1024 个具体位置。
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
 
     # Handle boundary
+    # 边界掩码 (Mask)。如果总数是 1005，但最后一块还是开了 1024，mask 就会标记出哪些索引是有效的（True），哪些是超出范围的（False）。
     mask = offsets < num_elements
 
     # Read
+    # 从显存加载整个块的数据。Triton 会自动帮你处理“内存合并读取”，确保一次读入一大片，非常高效。越界的地方会被忽略（得益于 mask）。
     x = tl.load(x_ptr + offsets, mask=mask)
 
     # Approx gelu is 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     # Compute (tl.tanh doesn't exist, use tanh(a) = (exp(2a) - 1) / (exp(2a) + 1)
+    # 核心逻辑（寄存器运算）。这里的运算是向量化的，一次对 1024 个数同时计算。
     a = 0.79788456 * (x + 0.044715 * x * x * x)
     exp = tl.exp(2 * a)
     tanh = (exp - 1) / (exp + 1)
     y = 0.5 * x * (1 + tanh)
 
     # Store
+    # 将算好的结果存回显存。同样使用 mask 确保不会写到不该写的地方（内存越界是很危险的）。
     tl.store(y_ptr + offsets, y, mask=mask)
 
 
@@ -724,7 +756,7 @@ def triton_softmax(x: torch.Tensor):
 
     # Determine grid
     M, N = x.shape                          # Number of rows x number of columns
-    block_size = triton.next_power_of_2(N)  # Each block contains all the columns
+    block_size = triton.next_power_of_2(N)  # Each block contains all the columns，同时这里计算对齐：GPU 的指令集在处理 2 的幂次方（如 256, 512, 1024）的数据块时效率最高。
     num_blocks = M                          # Each block is a row
 
     # Launch kernel
@@ -738,16 +770,18 @@ def triton_softmax(x: torch.Tensor):
 
 
 @triton.jit
-def triton_softmax_kernel(x_ptr, y_ptr, x_row_stride, y_row_stride, num_cols, BLOCK_SIZE: tl.constexpr):
-    assert num_cols <= BLOCK_SIZE
+def triton_softmax_kernel(x_ptr, y_ptr, x_row_stride, y_row_stride, num_cols, BLOCK_SIZE: tl.constexpr): # x_row_stride: 换行时指针要跳过多少个元素（这是处理二维张量的关键）
+    assert num_cols <= BLOCK_SIZE # Triton 要求我们处理的一整行必须能塞进一个 BLOCK_SIZE 里。
 
     # Process each row independently
-    row_idx = tl.program_id(0)
-    col_offsets = tl.arange(0, BLOCK_SIZE)
+    row_idx = tl.program_id(0) # 确定当前处理哪一行。比如我们有 100 行，开启了 100 个 program，每个 pid 就对应一行。
+    col_offsets = tl.arange(0, BLOCK_SIZE) # 生成列索引偏移 [0, 1, 2, ..., BLOCK_SIZE-1]
 
     # Read from global memory
-    x_start_ptr = x_ptr + row_idx * x_row_stride
-    x_ptrs = x_start_ptr + col_offsets
+    x_start_ptr = x_ptr + row_idx * x_row_stride # 计算当前行在显存里的起始位置：指针 = 首地址 + 行号 * 步长
+    x_ptrs = x_start_ptr + col_offsets # 得到这一行所有元素的指针向量
+    # 读取数据。如果列数不满 BLOCK_SIZE，超出部分用 -inf (负无穷) 填充。
+    # 为什么要填 -inf？因为后面要求 max，-inf 不会影响结果。
     x_row = tl.load(x_ptrs, mask=col_offsets < num_cols, other=float("-inf"))
 
     # Compute
@@ -757,9 +791,9 @@ def triton_softmax_kernel(x_ptr, y_ptr, x_row_stride, y_row_stride, num_cols, BL
     y_row = numerator / denominator
 
     # Write back to global memory
-    y_start_ptr = y_ptr + row_idx * y_row_stride
-    y_ptrs = y_start_ptr + col_offsets
-    tl.store(y_ptrs, y_row, mask=col_offsets < num_cols)
+    y_start_ptr = y_ptr + row_idx * y_row_stride # 计算输出张量的对应行起始位置
+    y_ptrs = y_start_ptr + col_offsets # 得到这一行所有元素的指针向量
+    tl.store(y_ptrs, y_row, mask=col_offsets < num_cols) # 将算好的这一整行写回显存
 
 
 def triton_matmul_main():
