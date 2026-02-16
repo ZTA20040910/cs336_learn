@@ -117,11 +117,11 @@ def review_of_arithmetic_intensity():
     assert flops == 2*B*D*F
     assert bytes_transferred == 2*B*D + 2*D*F + 2*B*F
     text("Recall that **arithmetic intensity** is how much compute we do per byte transferred (want to be high).")
-    intensity = (flops / bytes_transferred).simplify()  # @inspect intensity
+    intensity = (flops / bytes_transferred).simplify()  # @inspect intensity,重要！
 
     text("Assuming B is much less than D and F, then we can simplify:")
     intensity = intensity.subs(D, c*B).subs(F, c*B).limit(c, oo).simplify()  # @inspect intensity
-    assert intensity == B
+    assert intensity == B # 简化结果！
 
     text("Accelerator intensity of H100:")
     flops_per_second = 989e12
@@ -129,6 +129,7 @@ def review_of_arithmetic_intensity():
     accelerator_intensity = flops_per_second / memory_bandwidth  # @inspect accelerator_intensity
     assert round(accelerator_intensity) == 295
 
+    # 重要判断！
     text("If computation intensity > accelerator intensity, **compute-limited** (good)")
     text("If computation intensity < accelerator intensity, **memory-limited** (bad)")
     text("Conclusion: compute-limited iff B > 295")
@@ -186,7 +187,7 @@ def arithmetic_intensity_of_inference():
     intensity = (flops / bytes_transferred).simplify()  # @inspect intensity
     text("Assume that B*T is much smaller than D and F.")
     intensity = intensity.subs(D, c*B*T).subs(F, c*B*T).limit(c, oo).simplify()  # @inspect intensity
-    assert intensity == B*T
+    assert intensity == B*T # 简化结果！
 
     text("For the two stages:")
     text("1. Prefill: easy to make compute-limited (good) by making B T large enough")
@@ -210,7 +211,7 @@ def arithmetic_intensity_of_inference():
     assert flops == 4*B*S*T*D
     assert bytes_transferred == 4*B*S*D + 4*B*T*D
     intensity = (flops / bytes_transferred).simplify()  # @inspect intensity
-    assert intensity == S*T / (S + T)
+    assert intensity == S*T / (S + T) # 简化结果！
 
     text("For the two stages:")
     text("1. Prefill: T = S")
@@ -225,6 +226,7 @@ def arithmetic_intensity_of_inference():
     text("- In MLP layers, every sequence hits the same MLP weights (Wup, Wgate, Wdown don't depend on B)")
     text("- In attention layers, every sequence has its own vectors KV cache (Q, K, V all depend on B)")
 
+    # 重要结论！
     text("Summary")
     text("- Prefill is compute-limited, generation is memory-limited")
     text("- MLP intensity is B (requires concurrent requests), attention intensity is 1 (impossible to improve)")
@@ -235,21 +237,21 @@ def compute_transformer_stats(config):  # @inspect config
     text("The memory, throughput, and latency depends on the shape of the Transformer. "), text(" "), link("")
 
     text("Compute the number of parameters in the Transformer:")
-    num_params = 2*V*D + D*F*3*L + (2*D*N*H + 2*D*K*H)*L
+    num_params = 2*V*D + D*F*3*L + (2*D*N*H + 2*D*K*H)*L # embedding + mlp + attention
     text("To store parameters, just use bf16 (training requires fp32)")
-    parameter_size = num_params * 2  # 2 for bf16
+    parameter_size = num_params * 2  # 2 for bf16，每个参数占用 2 个字节。
     
     text("We also don't need gradients and optimizer states since we're not training.")
     text("But we do have to store the KV cache (which are some of the activations) for each sequence (of length S):")
     text("How much we have to store per sequence:")
-    kv_cache_size = S * (K*H) * L * 2 * 2  # 2 for key + value, 2 for bf16
+    kv_cache_size = S * (K*H) * L * 2 * 2  # 2 for key + value, 2 for bf16。S是序列中的token数量，K是头数，H是每个头的维度，L是层数。第一个2: 因为要存 Key 和 Value 两个矩阵。第二个2: 每个元素占 2 字节。
 
     text("Total memory usage:")
-    memory = B * kv_cache_size + parameter_size
+    memory = B * kv_cache_size + parameter_size #总内存 = 批处理大小 * 单个序列 KV Cache + 模型参数大小。
     text("Latency is determined by memory IO (read all parameters and KV cache for each step)")
-    latency = memory / memory_bandwidth
+    latency = memory / memory_bandwidth #延迟 = 总内存 / 内存带宽。
     text("Throughput is the inverse of latency, but we're generating B tokens in parallel")
-    throughput = B / latency
+    throughput = B / latency #吞吐量 = 批处理大小 / 延迟。
 
     # Substitute
     num_params = num_params.subs(config).simplify()  # @inspect num_params
@@ -304,6 +306,7 @@ def reduce_kv_cache_size():
     text("So let's try to reduce the size of the KV cache")
     text("...but make sure we don't lose too much accuracy.")
 
+    # Grouped-query attention (GQA)
     text("### Grouped-query attention (GQA) "), link(gqa)
     image("https://jax-ml.github.io/scaling-book/assets/img/gmqa.png", width=800)
     text("Idea: N query heads, but only K key and value heads, each interacting with N/K query heads")
@@ -328,6 +331,7 @@ def reduce_kv_cache_size():
     text("Check that accuracy doesn't drop: "); link(gqa)
     image("images/gqa-accuracy.png", width=800)
 
+    # Multi-head latent attention (MLA) 
     text("### Multi-head latent attention (MLA) "), link(mla)
     image("images/mla-schema.png", width=800)
     text("Key idea: project down each key and value vector from N*H dimensions to C dimensions")
@@ -341,12 +345,14 @@ def reduce_kv_cache_size():
     text("Second, MLA is a bit better than MHA (and much cheaper) [Table 9] "); link(mla)
     image("images/mla-accuracy2.png", width=800)
 
+    # Cross-layer attention (CLA) 
     text("### Cross-layer attention (CLA) "), link("https://arxiv.org/abs/2405.12981")
     image("images/cla-diagram.png", width=500)
     text("Idea: share KVs across **layers** (just as GQA shares KVs across heads)")
     text("Empirically improves the pareto frontier of accuracy and KV cache size (latency and throughput)")
     image("images/cla-results.png", width=700)
 
+    # Local attention 
     text("### Local attention "), link(longformer), link(sparse_transformer), link(mistral_7b)
     image("images/longformer-attention.png", width=800)
     text("Idea: just look at the local context, which is most relevant for modeling")
